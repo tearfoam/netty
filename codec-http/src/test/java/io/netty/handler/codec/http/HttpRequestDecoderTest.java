@@ -334,4 +334,19 @@ public class HttpRequestDecoderTest {
         assertTrue(request.decoderResult().cause() instanceof IllegalArgumentException);
         assertFalse(channel.finish());
     }
+
+    @Test
+    public void testMultipleContentLengthHeaders() {
+        EmbeddedChannel channel = new EmbeddedChannel(new HttpRequestDecoder());
+        String requestStr = "GET /some/path HTTP/1.1\r\n" +
+                "Content-Length: 1\r\n" +
+                "Content-Length: 0\r\n\r\n" +
+                "b";
+
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(requestStr, CharsetUtil.US_ASCII)));
+        HttpRequest request = channel.readInbound();
+        assertTrue(request.decoderResult().isFailure());
+        assertTrue(request.decoderResult().cause() instanceof IllegalArgumentException);
+        assertFalse(channel.finish());
+    }
 }

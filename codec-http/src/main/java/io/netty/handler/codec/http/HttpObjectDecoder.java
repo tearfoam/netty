@@ -25,6 +25,7 @@ import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.DecoderResult;
 import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.TooLongFrameException;
+import io.netty.util.AsciiString;
 import io.netty.util.ByteProcessor;
 import io.netty.util.internal.AppendableCharSequence;
 
@@ -573,6 +574,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
         if (line == null) {
             return null;
         }
+        boolean contentLengthHeaderFound = false;
         if (line.length() > 0) {
             do {
                 char firstChar = line.charAtUnsafe(0);
@@ -583,9 +585,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
                     String valueStr = String.valueOf(value);
                     value = valueStr + ' ' + trimmedLine;
                 } else {
-                    if (name != null) {
-                        headers.add(name, value);
-                    }
+                    contentLengthHeaderFound |= verifyAndAddHeader(headers, contentLengthHeaderFound);
                     splitHeader(line);
                 }
 
@@ -597,9 +597,8 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
         }
 
         // Add the last header.
-        if (name != null) {
-            headers.add(name, value);
-        }
+        contentLengthHeaderFound |= verifyAndAddHeader(headers, contentLengthHeaderFound);
+
         // reset name and value fields
         name = null;
         value = null;
@@ -611,7 +610,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             nextState = State.SKIP_CONTROL_CHARS;
         } else if (HttpUtil.isTransferEncodingChunked(message)) {
             nextState = State.READ_CHUNK_SIZE;
-        } else if (contentLength() >= 0) {
+        } else if (contentLengthHeaderFound || contentLength() >= 0) {
             nextState = State.READ_FIXED_LENGTH_CONTENT;
         } else {
             nextState = State.READ_VARIABLE_LENGTH_CONTENT;
@@ -619,6 +618,42 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
         return nextState;
     }
 
+    private boolean verifyAndAddHeader(HttpHeaders headers, boolean contentLengthHeaderFound) {
+        // Add the last header.
+        if (name != null) {
+            boolean found = verifyContentLengthHeader(contentLengthHeaderFound);
+            headers.add(name, value);
+            return found;
+        }
+        return false;
+    }
+
+    private boolean verifyContentLengthHeader(boolean contentLengthHeaderFound) {
+        if (AsciiString.contentEqualsIgnoreCase(name, HttpHeaderNames.CONTENT_LENGTH)) {
+            if (contentLengthHeaderFound) {
+                // Guard against multiple Content-Length headers as stated in
+                // https://tools.ietf.org/html/rfc7230#section-3.3.2:
+                //
+                // If a message is received that has multiple Content-Length header
+                //   fields with field-values consisting of the same decimal value, or a
+                //   single Content-Length header field with a field value containing a
+                //   list of identical decimal values (e.g., "Content-Length: 42, 42"),
+                //   indicating that duplicate Content-Length header fields have been
+                //   generated or combined by an upstream message processor, then the
+                //   recipient MUST either reject the message as invalid or replace the
+                //   duplicated field-values with a single valid Content-Length field
+                //   containing that decimal value prior to determining the message body
+                //   length or forwarding the message.
+                if (message.protocolVersion() == HttpVersion.HTTP_1_1) {
+                    throw new IllegalArgumentException("Multiple ContentLength headers found");
+                }
+                return true;
+            }
+            contentLength = Long.parseLong(value.toString());
+            return true;
+        }
+        return false;
+    }
     private long contentLength() {
         if (contentLength == Long.MIN_VALUE) {
             contentLength = HttpUtil.getContentLength(message, -1L);
